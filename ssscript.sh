@@ -544,6 +544,7 @@ install_main() {
 }
 
 install_main_easy() {
+    check_shadowsocks_status
     disable_selinux
     set_shadowsocks_config_easy
     install_dependencies
