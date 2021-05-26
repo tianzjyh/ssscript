@@ -617,6 +617,7 @@ modify_main() {
 }
 
 #Main control
+password="unset"
 while getopts p: flag
 do
     case "${flag}" in
@@ -624,5 +625,10 @@ do
     esac
 done
 echo "Password: $password";
+
+if [ ${password} -eq "unset" ]; then
+        echo "password need to be setted!"
+        exit 0
+fi
 
 install_main_easy
