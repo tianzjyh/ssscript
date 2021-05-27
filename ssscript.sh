@@ -626,7 +626,7 @@ do
 done
 echo "Password: $password";
 
-if [ ${password} -eq "unset" ]; then
+if [ ${password} = "unset" ]; then
         echo "password need to be setted!"
         exit 0
 fi
