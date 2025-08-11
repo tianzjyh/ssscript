@@ -813,7 +813,6 @@ function config_shadowsocks() {
     "server_port":${ssport},
     "password":"${sspassword}",
     "timeout":300,
-    "user":"nobody",
     "method":"${sscipher}",
     "plugin":"obfs-server",
     "plugin_opts":"obfs=http",
@@ -954,11 +953,8 @@ function install_shadowsocks() {
             exit 1
         fi
         
-        # Check if nobody user exists, create if needed
-        if ! id nobody >/dev/null 2>&1; then
-            echo -e "${yellow}[Info]${plain} Creating nobody user for CentOS 9..."
-            useradd -r -s /sbin/nologin nobody
-        fi
+        # Using root user instead of nobody for shadowsocks
+        echo -e "${green}[Info]${plain} Shadowsocks will run as root user for maximum compatibility"
         
         cat > /etc/systemd/system/shadowsocks-libev.service << 'EOF'
 [Unit]
@@ -972,8 +968,7 @@ ExecStart=/usr/local/bin/ss-server -c /etc/shadowsocks-libev/config.json
 ExecStartPre=/bin/sh -c 'ulimit -n 51200'
 Restart=on-failure
 RestartSec=5s
-User=nobody
-Group=nobody
+# Running as root for maximum compatibility
 LimitNOFILE=51200
 
 [Install]
@@ -999,11 +994,8 @@ EOF
             else
                 echo -e "${yellow}[Warning]${plain} Failed to download init script, creating systemd service..."
                 
-                # Check if nobody user exists, create if needed
-                if ! id nobody >/dev/null 2>&1; then
-                    echo -e "${yellow}[Info]${plain} Creating nobody user..."
-                    useradd -r -s /sbin/nologin nobody
-                fi
+                # Using root user instead of nobody for maximum compatibility
+                echo -e "${green}[Info]${plain} Shadowsocks will run as root user"
                 
                 cat > /etc/systemd/system/shadowsocks-libev.service << 'EOF'
 [Unit]
@@ -1017,8 +1009,7 @@ ExecStart=/usr/local/bin/ss-server -c /etc/shadowsocks-libev/config.json
 ExecStartPre=/bin/sh -c 'ulimit -n 51200'
 Restart=on-failure
 RestartSec=5s
-User=nobody
-Group=nobody
+# Running as root for maximum compatibility
 LimitNOFILE=51200
 
 [Install]
