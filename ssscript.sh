@@ -60,16 +60,20 @@ function install_libev_from_source() {
     tar zxf libev-4.33.tar.gz
     cd libev-4.33
     
-    # Configure and compile
-    ./configure --prefix=/usr/local --enable-shared --enable-static
+    # Configure with proper flags for CentOS 9 compatibility
+    export CFLAGS="-fPIC -O2"
+    export CXXFLAGS="-fPIC -O2"
+    ./configure --prefix=/usr/local --enable-shared --enable-static --disable-dependency-tracking
+    
     make clean
-    make && make install
+    make -j$(nproc) && make install
     
     if [ $? -eq 0 ]; then
         echo -e "${green}[Info]${plain} libev compiled and installed successfully"
         
-        # Update library path
+        # Update library path and cache
         echo "/usr/local/lib" > /etc/ld.so.conf.d/libev.conf
+        echo "/usr/local/lib64" >> /etc/ld.so.conf.d/libev.conf
         ldconfig
         
         # Create symlinks for compatibility if needed
@@ -77,8 +81,16 @@ function install_libev_from_source() {
             ln -sf /usr/local/include/ev.h /usr/include/ev.h
         fi
         
-        # Create pkgconfig file if it doesn't exist
+        # Also create symlink in lib64 for CentOS 9
+        if [ -f /usr/local/lib/libev.so ] && [ ! -f /usr/local/lib64/libev.so ]; then
+            mkdir -p /usr/local/lib64
+            ln -sf /usr/local/lib/libev.so* /usr/local/lib64/
+        fi
+        
+        # Create pkgconfig file with enhanced paths
         mkdir -p /usr/local/lib/pkgconfig
+        mkdir -p /usr/local/lib64/pkgconfig
+        
         cat > /usr/local/lib/pkgconfig/libev.pc << EOF
 prefix=/usr/local
 exec_prefix=\${prefix}
@@ -92,6 +104,9 @@ Libs: -L\${libdir} -lev
 Libs.private: -lm
 Cflags: -I\${includedir}
 EOF
+        
+        # Copy to lib64 pkgconfig as well
+        cp /usr/local/lib/pkgconfig/libev.pc /usr/local/lib64/pkgconfig/
         
         cd /tmp && rm -rf libev-4.33*
         return 0
@@ -131,13 +146,23 @@ function ensure_libev_available() {
         pkg_manager="dnf"
     fi
     
-    # Try different package names
-    for pkg in libev-devel libevent-devel; do
+    # Try different package names for different CentOS versions
+    local packages_to_try=()
+    
+    if check_centos_main_version 9; then
+        # CentOS 9 specific packages
+        packages_to_try=("libev-devel" "compat-libev-devel")
+    else
+        # CentOS 6, 7, 8 packages
+        packages_to_try=("libev-devel" "libevent-devel")
+    fi
+    
+    for pkg in "${packages_to_try[@]}"; do
         echo -e "${green}[Info]${plain} Trying to install $pkg..."
         ${pkg_manager} install -y $pkg
         if [ $? -eq 0 ]; then
             ldconfig
-            if pkg-config --exists libev 2>/dev/null || ldconfig -p | grep -q libev; then
+            if pkg-config --exists libev 2>/dev/null || ldconfig -p | grep -q libev || [ -f /usr/include/ev.h ]; then
                 echo -e "${green}[Info]${plain} Successfully installed $pkg"
                 return 0
             fi
@@ -389,7 +414,14 @@ function install_dependencies() {
         
         # Install basic dependencies
         echo -e "${green}[Info]${plain} Installing basic dependencies..."
-        ${pkg_manager} install -y unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto pcre pcre-devel git c-ares-devel wget
+        if check_centos_main_version 9; then
+            # CentOS 9 specific packages and groups
+            ${pkg_manager} groupinstall -y "Development Tools"
+            ${pkg_manager} install -y unzip openssl openssl-devel gettext gcc gcc-c++ autoconf libtool automake make asciidoc xmlto pcre pcre-devel git c-ares-devel wget pkgconfig
+        else
+            # CentOS 6, 7, 8 packages
+            ${pkg_manager} install -y unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto pcre pcre-devel git c-ares-devel wget
+        fi
         if [ $? -ne 0 ]; then
             echo -e "${red}[Error]${plain} Basic dependencies install failed, please try again!"
             exit 1
@@ -572,14 +604,24 @@ function install_shadowsocks() {
         cd ${shadowsocksnewver}
     fi
     
-    # Set up environment variables for compilation
-    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH"
+    # Set up comprehensive environment variables for compilation
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:$PKG_CONFIG_PATH"
     export CPPFLAGS="-I/usr/local/include -I/usr/include $CPPFLAGS"
-    export LDFLAGS="-L/usr/local/lib -L/usr/lib64 -L/usr/lib $LDFLAGS"
-    export LD_LIBRARY_PATH="/usr/local/lib:/usr/lib64:/usr/lib:$LD_LIBRARY_PATH"
+    export LDFLAGS="-L/usr/local/lib -L/usr/local/lib64 -L/usr/lib64 -L/usr/lib -Wl,-rpath,/usr/local/lib $LDFLAGS"
+    export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:$LD_LIBRARY_PATH"
+    export C_INCLUDE_PATH="/usr/local/include:/usr/include:$C_INCLUDE_PATH"
+    export LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:$LIBRARY_PATH"
+    
+    # Force configure to find libev
+    export libev_CFLAGS="-I/usr/local/include"
+    export libev_LIBS="-L/usr/local/lib -lev"
     
     echo -e "${green}[Info]${plain} Configuring shadowsocks..."
-    ./configure --disable-documentation
+    # Configure with explicit libev paths for CentOS 9
+    ./configure --disable-documentation \
+                --with-ev=/usr/local \
+                --enable-static \
+                --enable-shared
     make && make install
     if [ $? -ne 0 ]; then
         echo -e "${red}[Error]${plain} Shadowsocks install failed, please try again!"
