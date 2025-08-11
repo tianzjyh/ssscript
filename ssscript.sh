@@ -756,20 +756,78 @@ function install_shadowsocks() {
         echo -e "${red}[Error]${plain} Shadowsocks install failed, please try again!"
         exit 1
     fi
+    # Download and install init script
+    echo -e "${green}[Info]${plain} Installing shadowsocks init script..."
     if [ ! -f /etc/init.d/shadowsocks ]; then
-        download "/etc/init.d/shadowsocks" "${initscripturl}"
+        # Download to temp location first
+        cd /tmp
+        wget --no-check-certificate -c -t 3 -T 60 -O shadowsocks-init "${initscripturl}"
+        if [ $? -eq 0 ]; then
+            # Move to proper location and set permissions
+            mv shadowsocks-init /etc/init.d/shadowsocks
+            chmod +x /etc/init.d/shadowsocks
+            echo -e "${green}[Info]${plain} shadowsocks init script installed successfully"
+        else
+            echo -e "${yellow}[Warning]${plain} Failed to download init script, creating basic systemd service..."
+            # Create systemd service as fallback
+            cat > /etc/systemd/system/shadowsocks-libev.service << 'EOF'
+[Unit]
+Description=Shadowsocks-Libev Server Service
+Documentation=man:ss-server(1)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ss-server -c /etc/shadowsocks-libev/config.json
+Restart=on-failure
+RestartSec=5s
+User=nobody
+Group=nobody
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload
+            systemctl enable shadowsocks-libev
+            echo -e "${green}[Info]${plain} Created systemd service as fallback"
+        fi
+        cd ${currentdir}
     fi
-    chmod +x /etc/init.d/shadowsocks
-    /etc/init.d/shadowsocks start
-    if [ $? -ne 0 ]; then
-        echo -e "${red}[Error]${plain} Shadowsocks start failed, please try again!"
-        exit 1
-    fi
-    if check_release centos; then
-        chkconfig --add shadowsocks
-        chkconfig shadowsocks on
+    # Start shadowsocks service
+    echo -e "${green}[Info]${plain} Starting shadowsocks service..."
+    if [ -f /etc/init.d/shadowsocks ]; then
+        chmod +x /etc/init.d/shadowsocks
+        /etc/init.d/shadowsocks start
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks started successfully via init script"
+            # Enable service for auto-start
+            if check_release centos; then
+                chkconfig --add shadowsocks
+                chkconfig shadowsocks on
+            else
+                update-rc.d -f shadowsocks defaults
+            fi
+        else
+            echo -e "${yellow}[Warning]${plain} Init script failed, trying systemd..."
+            systemctl start shadowsocks-libev
+            if [ $? -eq 0 ]; then
+                echo -e "${green}[Info]${plain} Shadowsocks started successfully via systemd"
+            else
+                echo -e "${red}[Error]${plain} Failed to start shadowsocks via both init and systemd!"
+                exit 1
+            fi
+        fi
+    elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
+        systemctl start shadowsocks-libev
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks started successfully via systemd"
+        else
+            echo -e "${red}[Error]${plain} Failed to start shadowsocks via systemd!"
+            exit 1
+        fi
     else
-        update-rc.d -f shadowsocks defaults
+        echo -e "${red}[Error]${plain} No service script available!"
+        exit 1
     fi
 
     cd ${currentdir}
@@ -891,30 +949,63 @@ update_main() {
 }
 
 start_main() {
-    /etc/init.d/shadowsocks start
-    if [ $? -eq 0 ]; then
-        echo -e "${green}[Info]${plain} Shadowsocks start successfully."
+    if [ -f /etc/init.d/shadowsocks ]; then
+        /etc/init.d/shadowsocks start
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks start successfully."
+        else
+            echo -e "${red}[Error]${plain} Shadowsocks start failed, please try again!"
+        fi
+    elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
+        systemctl start shadowsocks-libev
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks start successfully."
+        else
+            echo -e "${red}[Error]${plain} Shadowsocks start failed, please try again!"
+        fi
     else
-        echo -e "${red}[Error]${plain} Shadowsocks start failed, please try again!"
+        echo -e "${red}[Error]${plain} No shadowsocks service found!"
     fi
 }
 
 stop_main() {
-    /etc/init.d/shadowsocks stop
-    if [ $? -eq 0 ]; then
-        echo -e "${green}[Info]${plain} Shadowsocks start successfully."
+    if [ -f /etc/init.d/shadowsocks ]; then
+        /etc/init.d/shadowsocks stop
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks stop successfully."
+        else
+            echo -e "${red}[Error]${plain} Shadowsocks stop failed, please try again!"
+        fi
+    elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
+        systemctl stop shadowsocks-libev
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks stop successfully."
+        else
+            echo -e "${red}[Error]${plain} Shadowsocks stop failed, please try again!"
+        fi
     else
-        echo -e "${red}[Error]${plain} Shadowsocks stop failed, please try again!"
+        echo -e "${red}[Error]${plain} No shadowsocks service found!"
     fi
 }
 
 restart_main() {
-    /etc/init.d/shadowsocks stop
-    /etc/init.d/shadowsocks start
-    if [ $? -eq 0 ]; then
-        echo -e "${green}[Info]${plain} Shadowsocks restart successfully."
+    if [ -f /etc/init.d/shadowsocks ]; then
+        /etc/init.d/shadowsocks stop
+        /etc/init.d/shadowsocks start
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks restart successfully."
+        else
+            echo -e "${red}[Error]${plain} Shadowsocks restart failed, please try again!"
+        fi
+    elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
+        systemctl restart shadowsocks-libev
+        if [ $? -eq 0 ]; then
+            echo -e "${green}[Info]${plain} Shadowsocks restart successfully."
+        else
+            echo -e "${red}[Error]${plain} Shadowsocks restart failed, please try again!"
+        fi
     else
-        echo -e "${red}[Error]${plain} Shadowsocks restart failed, please try again!"
+        echo -e "${red}[Error]${plain} No shadowsocks service found!"
     fi
 }
 
@@ -926,10 +1017,24 @@ status_main() {
 
 modify_main() {
     set_shadowsocks_config
-    /etc/init.d/shadowsocks stop
+    
+    # Stop service
+    if [ -f /etc/init.d/shadowsocks ]; then
+        /etc/init.d/shadowsocks stop
+    elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
+        systemctl stop shadowsocks-libev
+    fi
+    
     set_firewall
     config_shadowsocks
-    /etc/init.d/shadowsocks start
+    
+    # Start service
+    if [ -f /etc/init.d/shadowsocks ]; then
+        /etc/init.d/shadowsocks start
+    elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
+        systemctl start shadowsocks-libev
+    fi
+    
     install_success
 }
 
