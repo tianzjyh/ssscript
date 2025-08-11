@@ -488,20 +488,71 @@ function install_dependencies() {
             yum-config-manager --enable epel
         fi
         
-        # Install basic dependencies
-        echo -e "${green}[Info]${plain} Installing basic dependencies..."
+        # Check and create swap if needed for low-memory VPS
+        local mem_mb=$(free -m | awk 'NR==2{printf "%.0f", $2}')
+        echo -e "${green}[Info]${plain} System memory: ${mem_mb}MB"
+        
+        if [ ${mem_mb} -lt 1500 ] && [ ! -f /swapfile ]; then
+            echo -e "${yellow}[Warning]${plain} Low memory detected (${mem_mb}MB). Creating temporary swap to prevent OOM..."
+            dd if=/dev/zero of=/swapfile bs=1M count=1024 2>/dev/null
+            chmod 600 /swapfile
+            mkswap /swapfile >/dev/null 2>&1
+            swapon /swapfile
+            echo -e "${green}[Info]${plain} 1GB swap file created and activated"
+        fi
+        
+        # Install basic dependencies - SPLIT TO AVOID MEMORY ISSUES
+        echo -e "${green}[Info]${plain} Installing basic dependencies (split installation for low-memory VPS)..."
+        
         if check_centos_main_version 9; then
-            # CentOS 9 specific packages and groups
-            ${pkg_manager} groupinstall -y "Development Tools"
-            ${pkg_manager} install -y unzip openssl openssl-devel gettext gcc gcc-c++ autoconf libtool automake make asciidoc xmlto pcre pcre-devel git c-ares-devel wget pkgconfig
+            # CentOS 9: Install in smaller batches to avoid OOM killer
+            echo -e "${green}[Info]${plain} Installing core build tools..."
+            ${pkg_manager} install -y gcc gcc-c++ make autoconf automake libtool
+            if [ $? -ne 0 ]; then
+                echo -e "${red}[Error]${plain} Core build tools install failed!"
+                exit 1
+            fi
+            sleep 2  # Let system recover
+            
+            echo -e "${green}[Info]${plain} Installing development libraries..."
+            ${pkg_manager} install -y openssl-devel pcre-devel zlib-devel c-ares-devel
+            if [ $? -ne 0 ]; then
+                echo -e "${red}[Error]${plain} Development libraries install failed!"
+                exit 1
+            fi
+            sleep 2  # Let system recover
+            
+            echo -e "${green}[Info]${plain} Installing utilities and tools..."
+            ${pkg_manager} install -y unzip openssl gettext git wget pkgconfig
+            if [ $? -ne 0 ]; then
+                echo -e "${red}[Error]${plain} Utilities install failed!"
+                exit 1
+            fi
+            sleep 2  # Let system recover
+            
+            echo -e "${green}[Info]${plain} Installing documentation tools (optional)..."
+            ${pkg_manager} install -y asciidoc xmlto || echo "Documentation tools failed (non-critical)"
+            
         else
-            # CentOS 6, 7, 8 packages
-            ${pkg_manager} install -y unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto pcre pcre-devel git c-ares-devel wget
+            # CentOS 6, 7, 8: Also split for consistency
+            echo -e "${green}[Info]${plain} Installing core dependencies..."
+            ${pkg_manager} install -y gcc make autoconf libtool automake
+            if [ $? -ne 0 ]; then
+                echo -e "${red}[Error]${plain} Core dependencies install failed!"
+                exit 1
+            fi
+            
+            echo -e "${green}[Info]${plain} Installing remaining dependencies..."
+            ${pkg_manager} install -y unzip openssl openssl-devel gettext pcre pcre-devel git c-ares-devel wget
+            if [ $? -ne 0 ]; then
+                echo -e "${red}[Error]${plain} Remaining dependencies install failed!"
+                exit 1
+            fi
+            
+            ${pkg_manager} install -y asciidoc xmlto || echo "Documentation tools failed (non-critical)"
         fi
-        if [ $? -ne 0 ]; then
-            echo -e "${red}[Error]${plain} Basic dependencies install failed, please try again!"
-            exit 1
-        fi
+        
+        echo -e "${green}[Info]${plain} All basic dependencies installed successfully!"
         
         # Auto-diagnose and fix libev
         ensure_libev_available
@@ -612,9 +663,9 @@ function install_mbedtls() {
     rm -rf ${mbedtlsver} ${mbedtlsver}-gpl.tgz
 }
 
-#Install obfs-plugin
+#Install obfs-plugin - MUST SUCCESS!
 function install_obfs(){
-    echo -e "${green}[Info]${plain} Installing simple-obfs plugin..."
+    echo -e "${green}[Info]${plain} Installing simple-obfs plugin (MANDATORY)..."
     cd ${currentdir}
     
     # Determine package manager
@@ -623,51 +674,110 @@ function install_obfs(){
         pkg_manager="dnf"
     fi
     
-    # Install dependencies
-    echo -e "${green}[Info]${plain} Installing obfs dependencies..."
-    ${pkg_manager} install -y zlib-devel openssl-devel
-    if [ $? -ne 0 ]; then
-        echo -e "${yellow}[Warning]${plain} Failed to install obfs dependencies, skipping obfs plugin"
-        return 1
+    # Install ALL required dependencies for obfs
+    echo -e "${green}[Info]${plain} Installing comprehensive obfs dependencies..."
+    if check_centos_main_version 9; then
+        ${pkg_manager} install -y zlib-devel openssl-devel autoconf automake libtool gcc gcc-c++ make git
+    else
+        ${pkg_manager} install -y zlib-devel openssl-devel autoconf automake libtool gcc make git
     fi
     
-    # Clone and build
-    if [ -d "simple-obfs" ]; then
+    if [ $? -ne 0 ]; then
+        echo -e "${red}[Error]${plain} CRITICAL: Failed to install obfs dependencies!"
+        echo -e "${red}[Error]${plain} obfs plugin is required. Cannot continue without it."
+        exit 1
+    fi
+    
+    # Clean up any previous attempts
+    rm -rf simple-obfs*
+    
+    # Try multiple sources for simple-obfs
+    local clone_success=0
+    local repos=(
+        "https://github.com/shadowsocks/simple-obfs.git"
+        "https://gitclone.com/github.com/shadowsocks/simple-obfs.git"
+    )
+    
+    for repo in "${repos[@]}"; do
+        echo -e "${green}[Info]${plain} Trying to clone from: $repo"
+        git clone "$repo" simple-obfs
+        if [ $? -eq 0 ]; then
+            clone_success=1
+            break
+        fi
         rm -rf simple-obfs
-    fi
+    done
     
-    git clone https://github.com/shadowsocks/simple-obfs.git
-    if [ $? -ne 0 ]; then
-        echo -e "${yellow}[Warning]${plain} Failed to clone simple-obfs, skipping obfs plugin"
-        return 1
+    if [ $clone_success -eq 0 ]; then
+        echo -e "${red}[Error]${plain} CRITICAL: Failed to clone simple-obfs from all sources!"
+        echo -e "${red}[Error]${plain} obfs plugin is required. Cannot continue."
+        exit 1
     fi
     
     cd simple-obfs
+    echo -e "${green}[Info]${plain} Initializing git submodules..."
     git submodule update --init --recursive
+    if [ $? -ne 0 ]; then
+        echo -e "${red}[Error]${plain} CRITICAL: Failed to initialize git submodules!"
+        cd ${currentdir}
+        exit 1
+    fi
+    
+    echo -e "${green}[Info]${plain} Running autogen.sh..."
     ./autogen.sh
     if [ $? -ne 0 ]; then
-        echo -e "${yellow}[Warning]${plain} autogen.sh failed, skipping obfs plugin"
+        echo -e "${red}[Error]${plain} CRITICAL: autogen.sh failed!"
+        echo -e "${yellow}[Debug]${plain} Checking for autogen requirements..."
+        which autoconf && which automake && which libtool || echo "Missing autotools!"
         cd ${currentdir}
-        return 1
+        exit 1
     fi
     
-    ./configure
+    echo -e "${green}[Info]${plain} Configuring simple-obfs..."
+    ./configure --disable-documentation
     if [ $? -ne 0 ]; then
-        echo -e "${yellow}[Warning]${plain} configure failed, skipping obfs plugin"
+        echo -e "${red}[Error]${plain} CRITICAL: configure failed!"
+        echo -e "${yellow}[Debug]${plain} Last 20 lines of config.log:"
+        tail -20 config.log 2>/dev/null || echo "No config.log found"
         cd ${currentdir}
-        return 1
+        exit 1
     fi
     
-    make && make install
-    if [ $? -eq 0 ]; then
-        echo -e "${green}[Info]${plain} simple-obfs plugin installed successfully"
+    echo -e "${green}[Info]${plain} Compiling simple-obfs..."
+    make -j$(nproc)
+    if [ $? -ne 0 ]; then
+        echo -e "${red}[Error]${plain} CRITICAL: make compilation failed!"
         cd ${currentdir}
-        return 0
-    else
-        echo -e "${yellow}[Warning]${plain} make failed, skipping obfs plugin"
-        cd ${currentdir}
-        return 1
+        exit 1
     fi
+    
+    echo -e "${green}[Info]${plain} Installing simple-obfs..."
+    make install
+    if [ $? -ne 0 ]; then
+        echo -e "${red}[Error]${plain} CRITICAL: make install failed!"
+        cd ${currentdir}
+        exit 1
+    fi
+    
+    # Update library cache
+    ldconfig
+    
+    # Verify installation
+    if [ -f /usr/local/bin/obfs-server ]; then
+        echo -e "${green}[Info]${plain} ✓ simple-obfs plugin installed successfully!"
+        echo -e "${green}[Info]${plain} obfs-server binary: $(ls -la /usr/local/bin/obfs-server)"
+        /usr/local/bin/obfs-server --help | head -3
+    else
+        echo -e "${red}[Error]${plain} CRITICAL: obfs-server binary not found after installation!"
+        find /usr -name "obfs-server" 2>/dev/null || echo "obfs-server not found anywhere!"
+        cd ${currentdir}
+        exit 1
+    fi
+    
+    cd ${currentdir}
+    rm -rf simple-obfs
+    echo -e "${green}[Info]${plain} simple-obfs installation completed successfully!"
+    return 0
 }
 
 #Config shadowsocks
@@ -688,17 +798,16 @@ function config_shadowsocks() {
         mkdir -p /etc/shadowsocks-libev
     fi
 
-    # Check if obfs plugin is available
-    local use_obfs="false"
-    if [ -f /usr/local/bin/obfs-server ]; then
-        echo -e "${green}[Info]${plain} obfs-server plugin found, enabling obfuscation"
-        use_obfs="true"
-    else
-        echo -e "${yellow}[Warning]${plain} obfs-server plugin not found, creating config without obfuscation"
+    # Verify obfs plugin is available (MANDATORY)
+    if [ ! -f /usr/local/bin/obfs-server ]; then
+        echo -e "${red}[Error]${plain} CRITICAL: obfs-server plugin not found!"
+        echo -e "${red}[Error]${plain} obfs plugin is required but missing. Cannot continue."
+        find /usr -name "obfs-server" 2>/dev/null || echo "obfs-server not found anywhere in system!"
+        exit 1
     fi
     
-    if [ "$use_obfs" = "true" ]; then
-        cat > /etc/shadowsocks-libev/config.json << EOF
+    echo -e "${green}[Info]${plain} ✓ obfs-server plugin verified, creating config with obfuscation"
+    cat > /etc/shadowsocks-libev/config.json << EOF
 {
     "server":${server_value},
     "server_port":${ssport},
@@ -713,21 +822,6 @@ function config_shadowsocks() {
     "mode":"tcp_and_udp"
 }
 EOF
-    else
-        cat > /etc/shadowsocks-libev/config.json << EOF
-{
-    "server":${server_value},
-    "server_port":${ssport},
-    "password":"${sspassword}",
-    "timeout":300,
-    "user":"nobody",
-    "method":"${sscipher}",
-    "fast_open":${fast_open},
-    "nameserver":"8.8.8.8",
-    "mode":"tcp_and_udp"
-}
-EOF
-    fi
 }
 
 #Install shadowsocks
