@@ -36,11 +36,17 @@ libevver="libev-4.33"
 libevurl="http://dist.schmorp.de/libev/libev-4.33.tar.gz"
 initscripturl="https://raw.githubusercontent.com/uxh/shadowsocks_bash/master/shadowsocks-libev"
 
-#Disable selinux
+#Disable selinux - SAFER VERSION
 function disable_selinux() {
     if [ -s /etc/selinux/config ] && grep "SELINUX=enforcing" /etc/selinux/config; then
-        sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+        echo -e "${yellow}[Warning]${plain} SELinux is enforcing. Temporarily setting to permissive mode."
+        echo -e "${yellow}[Warning]${plain} You can re-enable it later with: setenforce 1"
+        # Only set to permissive, don't permanently disable
         setenforce 0
+        # Create backup of original config
+        cp /etc/selinux/config /etc/selinux/config.backup.$(date +%Y%m%d_%H%M%S)
+        # Set to permissive instead of disabled
+        sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' /etc/selinux/config
     fi
 }
 
@@ -511,7 +517,8 @@ function install_dependencies() {
             exit 1
         fi
     fi
-    echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" > /etc/resolv.conf
+    # DNS modification removed - was causing connection loss on cloud providers
+    # echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" > /etc/resolv.conf
 }
 
 #Set firewall
@@ -522,10 +529,14 @@ function set_firewall() {
             if [ $? -eq 0 ]; then
                 iptables -L -n | grep "${ssport}" > /dev/null 2>&1
                 if [ $? -ne 0 ]; then
+                    echo -e "${yellow}[Warning]${plain} Adding iptables rules. SSH connection may be affected."
+                    # Ensure SSH port is allowed before adding rules
+                    iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 22 -j ACCEPT
                     iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${ssport} -j ACCEPT
                     iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${ssport} -j ACCEPT
                     /etc/init.d/iptables save
-                    /etc/init.d/iptables restart
+                    # Don't restart iptables service to avoid connection loss
+                    echo -e "${green}[Info]${plain} Iptables rules added. Restart avoided to prevent SSH disconnection."
                 fi
             fi
         elif check_centos_main_version 7 || check_centos_main_version 8 || check_centos_main_version 9; then
@@ -603,16 +614,60 @@ function install_mbedtls() {
 
 #Install obfs-plugin
 function install_obfs(){
+    echo -e "${green}[Info]${plain} Installing simple-obfs plugin..."
     cd ${currentdir}
     
-    yum install zlib-devel openssl-devel -y
+    # Determine package manager
+    local pkg_manager="yum"
+    if command -v dnf > /dev/null 2>&1; then
+        pkg_manager="dnf"
+    fi
+    
+    # Install dependencies
+    echo -e "${green}[Info]${plain} Installing obfs dependencies..."
+    ${pkg_manager} install -y zlib-devel openssl-devel
+    if [ $? -ne 0 ]; then
+        echo -e "${yellow}[Warning]${plain} Failed to install obfs dependencies, skipping obfs plugin"
+        return 1
+    fi
+    
+    # Clone and build
+    if [ -d "simple-obfs" ]; then
+        rm -rf simple-obfs
+    fi
+    
     git clone https://github.com/shadowsocks/simple-obfs.git
+    if [ $? -ne 0 ]; then
+        echo -e "${yellow}[Warning]${plain} Failed to clone simple-obfs, skipping obfs plugin"
+        return 1
+    fi
+    
     cd simple-obfs
     git submodule update --init --recursive
     ./autogen.sh
+    if [ $? -ne 0 ]; then
+        echo -e "${yellow}[Warning]${plain} autogen.sh failed, skipping obfs plugin"
+        cd ${currentdir}
+        return 1
+    fi
+    
     ./configure
-    make
-    make install
+    if [ $? -ne 0 ]; then
+        echo -e "${yellow}[Warning]${plain} configure failed, skipping obfs plugin"
+        cd ${currentdir}
+        return 1
+    fi
+    
+    make && make install
+    if [ $? -eq 0 ]; then
+        echo -e "${green}[Info]${plain} simple-obfs plugin installed successfully"
+        cd ${currentdir}
+        return 0
+    else
+        echo -e "${yellow}[Warning]${plain} make failed, skipping obfs plugin"
+        cd ${currentdir}
+        return 1
+    fi
 }
 
 #Config shadowsocks
@@ -633,7 +688,17 @@ function config_shadowsocks() {
         mkdir -p /etc/shadowsocks-libev
     fi
 
-    cat > /etc/shadowsocks-libev/config.json << EOF
+    # Check if obfs plugin is available
+    local use_obfs="false"
+    if [ -f /usr/local/bin/obfs-server ]; then
+        echo -e "${green}[Info]${plain} obfs-server plugin found, enabling obfuscation"
+        use_obfs="true"
+    else
+        echo -e "${yellow}[Warning]${plain} obfs-server plugin not found, creating config without obfuscation"
+    fi
+    
+    if [ "$use_obfs" = "true" ]; then
+        cat > /etc/shadowsocks-libev/config.json << EOF
 {
     "server":${server_value},
     "server_port":${ssport},
@@ -648,6 +713,21 @@ function config_shadowsocks() {
     "mode":"tcp_and_udp"
 }
 EOF
+    else
+        cat > /etc/shadowsocks-libev/config.json << EOF
+{
+    "server":${server_value},
+    "server_port":${ssport},
+    "password":"${sspassword}",
+    "timeout":300,
+    "user":"nobody",
+    "method":"${sscipher}",
+    "fast_open":${fast_open},
+    "nameserver":"8.8.8.8",
+    "mode":"tcp_and_udp"
+}
+EOF
+    fi
 }
 
 #Install shadowsocks
