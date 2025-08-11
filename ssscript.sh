@@ -756,21 +756,37 @@ function install_shadowsocks() {
         echo -e "${red}[Error]${plain} Shadowsocks install failed, please try again!"
         exit 1
     fi
-    # Download and install init script
-    echo -e "${green}[Info]${plain} Installing shadowsocks init script..."
-    if [ ! -f /etc/init.d/shadowsocks ]; then
-        # Download to temp location first
-        cd /tmp
-        wget --no-check-certificate -c -t 3 -T 60 -O shadowsocks-init "${initscripturl}"
-        if [ $? -eq 0 ]; then
-            # Move to proper location and set permissions
-            mv shadowsocks-init /etc/init.d/shadowsocks
-            chmod +x /etc/init.d/shadowsocks
-            echo -e "${green}[Info]${plain} shadowsocks init script installed successfully"
+    # Install service - prefer systemd for CentOS 9
+    echo -e "${green}[Info]${plain} Installing shadowsocks service..."
+    
+    if check_centos_main_version 9; then
+        # CentOS 9: Use systemd exclusively
+        echo -e "${green}[Info]${plain} CentOS 9 detected, creating systemd service..."
+        
+        # Verify required components before creating service
+        echo -e "${yellow}[DEBUG]${plain} Pre-service verification:"
+        if [ -f /usr/local/bin/ss-server ]; then
+            echo -e "${green}[DEBUG]${plain} ✓ ss-server binary found"
+            ls -la /usr/local/bin/ss-server
         else
-            echo -e "${yellow}[Warning]${plain} Failed to download init script, creating basic systemd service..."
-            # Create systemd service as fallback
-            cat > /etc/systemd/system/shadowsocks-libev.service << 'EOF'
+            echo -e "${red}[ERROR]${plain} ✗ ss-server binary not found!"
+            exit 1
+        fi
+        
+        if [ -f /etc/shadowsocks-libev/config.json ]; then
+            echo -e "${green}[DEBUG]${plain} ✓ config file found"
+        else
+            echo -e "${red}[ERROR]${plain} ✗ config file not found!"
+            exit 1
+        fi
+        
+        # Check if nobody user exists, create if needed
+        if ! id nobody >/dev/null 2>&1; then
+            echo -e "${yellow}[Info]${plain} Creating nobody user for CentOS 9..."
+            useradd -r -s /sbin/nologin nobody
+        fi
+        
+        cat > /etc/systemd/system/shadowsocks-libev.service << 'EOF'
 [Unit]
 Description=Shadowsocks-Libev Server Service
 Documentation=man:ss-server(1)
@@ -779,55 +795,136 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/ss-server -c /etc/shadowsocks-libev/config.json
+ExecStartPre=/bin/sh -c 'ulimit -n 51200'
 Restart=on-failure
 RestartSec=5s
 User=nobody
 Group=nobody
+LimitNOFILE=51200
 
 [Install]
 WantedBy=multi-user.target
 EOF
-            systemctl daemon-reload
-            systemctl enable shadowsocks-libev
-            echo -e "${green}[Info]${plain} Created systemd service as fallback"
+        systemctl daemon-reload
+        systemctl enable shadowsocks-libev
+        echo -e "${green}[Info]${plain} systemd service created and enabled"
+    else
+        # CentOS 6-8: Try traditional init script
+        if [ ! -f /etc/init.d/shadowsocks ]; then
+            # Ensure /etc/init.d directory exists
+            mkdir -p /etc/init.d
+            
+            # Download init script
+            cd /tmp
+            wget --no-check-certificate -c -t 3 -T 60 -O shadowsocks-init "${initscripturl}"
+            if [ $? -eq 0 ]; then
+                # Move to proper location and set permissions
+                mv shadowsocks-init /etc/init.d/shadowsocks
+                chmod +x /etc/init.d/shadowsocks
+                echo -e "${green}[Info]${plain} init script installed successfully"
+            else
+                echo -e "${yellow}[Warning]${plain} Failed to download init script, creating systemd service..."
+                
+                # Check if nobody user exists, create if needed
+                if ! id nobody >/dev/null 2>&1; then
+                    echo -e "${yellow}[Info]${plain} Creating nobody user..."
+                    useradd -r -s /sbin/nologin nobody
+                fi
+                
+                cat > /etc/systemd/system/shadowsocks-libev.service << 'EOF'
+[Unit]
+Description=Shadowsocks-Libev Server Service
+Documentation=man:ss-server(1)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ss-server -c /etc/shadowsocks-libev/config.json
+ExecStartPre=/bin/sh -c 'ulimit -n 51200'
+Restart=on-failure
+RestartSec=5s
+User=nobody
+Group=nobody
+LimitNOFILE=51200
+
+[Install]
+WantedBy=multi-user.target
+EOF
+                systemctl daemon-reload
+                systemctl enable shadowsocks-libev
+                echo -e "${green}[Info]${plain} Created systemd service as fallback"
+            fi
+            cd ${currentdir}
         fi
-        cd ${currentdir}
     fi
     # Start shadowsocks service
     echo -e "${green}[Info]${plain} Starting shadowsocks service..."
-    if [ -f /etc/init.d/shadowsocks ]; then
-        chmod +x /etc/init.d/shadowsocks
-        /etc/init.d/shadowsocks start
+    
+    if check_centos_main_version 9; then
+        # CentOS 9: Use systemd
+        echo -e "${yellow}[DEBUG]${plain} Starting shadowsocks-libev service..."
+        echo -e "${yellow}[DEBUG]${plain} Service file contents:"
+        cat /etc/systemd/system/shadowsocks-libev.service
+        echo -e "${yellow}[DEBUG]${plain} Config file contents:"
+        cat /etc/shadowsocks-libev/config.json
+        
+        systemctl start shadowsocks-libev
         if [ $? -eq 0 ]; then
-            echo -e "${green}[Info]${plain} Shadowsocks started successfully via init script"
-            # Enable service for auto-start
-            if check_release centos; then
-                chkconfig --add shadowsocks
-                chkconfig shadowsocks on
-            else
-                update-rc.d -f shadowsocks defaults
-            fi
+            echo -e "${green}[Info]${plain} Shadowsocks started successfully via systemd"
+            echo -e "${yellow}[DEBUG]${plain} Service status:"
+            systemctl status shadowsocks-libev --no-pager -l | head -10
         else
-            echo -e "${yellow}[Warning]${plain} Init script failed, trying systemd..."
+            echo -e "${red}[Error]${plain} Failed to start shadowsocks via systemd!"
+            echo -e "${yellow}[DEBUG]${plain} ===== SERVICE FAILURE ANALYSIS ====="
+            echo -e "${yellow}[DEBUG]${plain} systemctl status output:"
+            systemctl status shadowsocks-libev --no-pager -l
+            echo -e "${yellow}[DEBUG]${plain} journalctl logs (last 20 lines):"
+            journalctl -u shadowsocks-libev --no-pager -l -n 20
+            echo -e "${yellow}[DEBUG]${plain} Checking file permissions:"
+            ls -la /usr/local/bin/ss-server /etc/shadowsocks-libev/config.json
+            echo -e "${yellow}[DEBUG]${plain} Testing manual start:"
+            /usr/local/bin/ss-server -c /etc/shadowsocks-libev/config.json --help | head -5
+            echo -e "${yellow}[DEBUG]${plain} ===== END FAILURE ANALYSIS ====="
+            exit 1
+        fi
+    else
+        # CentOS 6-8: Try init script first, then systemd
+        if [ -f /etc/init.d/shadowsocks ]; then
+            chmod +x /etc/init.d/shadowsocks
+            /etc/init.d/shadowsocks start
+            if [ $? -eq 0 ]; then
+                echo -e "${green}[Info]${plain} Shadowsocks started successfully via init script"
+                # Enable service for auto-start
+                if check_release centos; then
+                    chkconfig --add shadowsocks
+                    chkconfig shadowsocks on
+                else
+                    update-rc.d -f shadowsocks defaults
+                fi
+            else
+                echo -e "${yellow}[Warning]${plain} Init script failed, trying systemd..."
+                systemctl start shadowsocks-libev
+                if [ $? -eq 0 ]; then
+                    echo -e "${green}[Info]${plain} Shadowsocks started successfully via systemd"
+                else
+                    echo -e "${red}[Error]${plain} Failed to start shadowsocks via both init and systemd!"
+                    exit 1
+                fi
+            fi
+        elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
             systemctl start shadowsocks-libev
             if [ $? -eq 0 ]; then
                 echo -e "${green}[Info]${plain} Shadowsocks started successfully via systemd"
             else
-                echo -e "${red}[Error]${plain} Failed to start shadowsocks via both init and systemd!"
+                echo -e "${red}[Error]${plain} Failed to start shadowsocks via systemd!"
+                echo -e "${yellow}[Debug]${plain} systemctl status output:"
+                systemctl status shadowsocks-libev --no-pager -l
                 exit 1
             fi
-        fi
-    elif [ -f /etc/systemd/system/shadowsocks-libev.service ]; then
-        systemctl start shadowsocks-libev
-        if [ $? -eq 0 ]; then
-            echo -e "${green}[Info]${plain} Shadowsocks started successfully via systemd"
         else
-            echo -e "${red}[Error]${plain} Failed to start shadowsocks via systemd!"
+            echo -e "${red}[Error]${plain} No service script available!"
             exit 1
         fi
-    else
-        echo -e "${red}[Error]${plain} No service script available!"
-        exit 1
     fi
 
     cd ${currentdir}
