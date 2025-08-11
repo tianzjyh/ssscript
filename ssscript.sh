@@ -32,6 +32,8 @@ mbedtlsver="mbedtls-2.16.12"
 mbedtlsurl="https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v2.16.12.tar.gz"
 shadowsocksver="shadowsocks-libev-3.3.5"
 shadowsocksurl="https://github.com/shadowsocks/shadowsocks-libev/releases/download/v3.3.5/shadowsocks-libev-3.3.5.tar.gz"
+libevver="libev-4.33"
+libevurl="http://dist.schmorp.de/libev/libev-4.33.tar.gz"
 initscripturl="https://raw.githubusercontent.com/uxh/shadowsocks_bash/master/shadowsocks-libev"
 
 #Disable selinux
@@ -42,59 +44,64 @@ function disable_selinux() {
     fi
 }
 
-#Install libev from source (fallback for CentOS 9)
+#Install libev from source - MANDATORY for CentOS 9
 function install_libev_from_source() {
-    echo -e "${green}[Info]${plain} libev not found in packages, compiling from source..."
+    echo -e "${green}[Info]${plain} Installing libev from source for CentOS 9 compatibility..."
     cd /tmp
     
     # Clean up any previous attempts
-    rm -rf libev-4.33*
+    rm -rf ${libevver}*
     
-    # Download and compile libev
-    wget -O libev-4.33.tar.gz http://dist.schmorp.de/libev/libev-4.33.tar.gz
-    if [ $? -ne 0 ]; then
-        echo -e "${red}[Error]${plain} Failed to download libev source!"
+    # Download libev source
+    download "${libevver}.tar.gz" "${libevurl}"
+    tar zxf ${libevver}.tar.gz
+    cd ${libevver}
+    
+    # Configure and compile - CRITICAL: Install to /usr not /usr/local for shadowsocks
+    echo -e "${yellow}[DEBUG]${plain} ===== LIBEV COMPILATION DEBUG ====="
+    echo -e "${yellow}[DEBUG]${plain} Current directory: $(pwd)"
+    echo -e "${yellow}[DEBUG]${plain} Available files:"
+    ls -la
+    
+    export CFLAGS="-fPIC -O2"
+    export CXXFLAGS="-fPIC -O2"
+    
+    echo -e "${yellow}[DEBUG]${plain} Running configure with --prefix=/usr"
+    ./configure --prefix=/usr --enable-shared --enable-static --disable-dependency-tracking 2>&1 | tee /tmp/libev_configure.log
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo -e "${red}[Error]${plain} libev configure failed!"
+        echo -e "${yellow}[DEBUG]${plain} Configure output:"
+        cat /tmp/libev_configure.log
         return 1
     fi
     
-    tar zxf libev-4.33.tar.gz
-    cd libev-4.33
-    
-    # Configure with proper flags for CentOS 9 compatibility
-    export CFLAGS="-fPIC -O2"
-    export CXXFLAGS="-fPIC -O2"
-    ./configure --prefix=/usr/local --enable-shared --enable-static --disable-dependency-tracking
-    
+    echo -e "${yellow}[DEBUG]${plain} Running make clean"
     make clean
-    make -j$(nproc) && make install
+    
+    echo -e "${yellow}[DEBUG]${plain} Running make with $(nproc) jobs"
+    make -j$(nproc) 2>&1 | tee /tmp/libev_make.log
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo -e "${red}[Error]${plain} libev make failed!"
+        return 1
+    fi
+    
+    echo -e "${yellow}[DEBUG]${plain} Running make install"
+    make install 2>&1 | tee /tmp/libev_install.log
     
     if [ $? -eq 0 ]; then
-        echo -e "${green}[Info]${plain} libev compiled and installed successfully"
+        echo -e "${green}[Info]${plain} libev make install completed"
         
-        # Update library path and cache
-        echo "/usr/local/lib" > /etc/ld.so.conf.d/libev.conf
-        echo "/usr/local/lib64" >> /etc/ld.so.conf.d/libev.conf
+        # Update library cache
         ldconfig
         
-        # Create symlinks for compatibility if needed
-        if [ ! -f /usr/include/ev.h ] && [ -f /usr/local/include/ev.h ]; then
-            ln -sf /usr/local/include/ev.h /usr/include/ev.h
-        fi
-        
-        # Also create symlink in lib64 for CentOS 9
-        if [ -f /usr/local/lib/libev.so ] && [ ! -f /usr/local/lib64/libev.so ]; then
-            mkdir -p /usr/local/lib64
-            ln -sf /usr/local/lib/libev.so* /usr/local/lib64/
-        fi
-        
-        # Create pkgconfig file with enhanced paths
-        mkdir -p /usr/local/lib/pkgconfig
-        mkdir -p /usr/local/lib64/pkgconfig
-        
-        cat > /usr/local/lib/pkgconfig/libev.pc << EOF
-prefix=/usr/local
+        # Create pkgconfig file in system location
+        mkdir -p /usr/lib64/pkgconfig
+        cat > /usr/lib64/pkgconfig/libev.pc << EOF
+prefix=/usr
 exec_prefix=\${prefix}
-libdir=\${exec_prefix}/lib
+libdir=\${exec_prefix}/lib64
 includedir=\${prefix}/include
 
 Name: libev
@@ -105,14 +112,84 @@ Libs.private: -lm
 Cflags: -I\${includedir}
 EOF
         
-        # Copy to lib64 pkgconfig as well
-        cp /usr/local/lib/pkgconfig/libev.pc /usr/local/lib64/pkgconfig/
+        echo -e "${yellow}[DEBUG]${plain} ===== LIBEV INSTALLATION VERIFICATION ====="
+        echo -e "${yellow}[DEBUG]${plain} Checking libev files after installation:"
         
-        cd /tmp && rm -rf libev-4.33*
-        return 0
+        # Check header file
+        if [ -f /usr/include/ev.h ]; then
+            echo -e "${green}[DEBUG]${plain} ✓ Header file found: /usr/include/ev.h"
+            ls -la /usr/include/ev.h
+        else
+            echo -e "${red}[DEBUG]${plain} ✗ Header file missing: /usr/include/ev.h"
+            echo -e "${yellow}[DEBUG]${plain} Available headers:"
+            find /usr -name "ev.h" 2>/dev/null || echo "No ev.h found anywhere in /usr"
+        fi
+        
+        # Check library files
+        if [ -f /usr/lib64/libev.so ]; then
+            echo -e "${green}[DEBUG]${plain} ✓ Library found: /usr/lib64/libev.so"
+            ls -la /usr/lib64/libev*
+        else
+            echo -e "${red}[DEBUG]${plain} ✗ Library missing: /usr/lib64/libev.so"
+            echo -e "${yellow}[DEBUG]${plain} Available libev libraries:"
+            find /usr -name "libev*" 2>/dev/null || echo "No libev libraries found anywhere in /usr"
+        fi
+        
+        # Check pkgconfig
+        if [ -f /usr/lib64/pkgconfig/libev.pc ]; then
+            echo -e "${green}[DEBUG]${plain} ✓ pkgconfig file created: /usr/lib64/pkgconfig/libev.pc"
+            cat /usr/lib64/pkgconfig/libev.pc
+        else
+            echo -e "${red}[DEBUG]${plain} ✗ pkgconfig file missing"
+        fi
+        
+        # Test pkg-config command
+        echo -e "${yellow}[DEBUG]${plain} Testing pkg-config libev:"
+        if pkg-config --exists libev; then
+            echo -e "${green}[DEBUG]${plain} ✓ pkg-config can find libev"
+            echo -e "${yellow}[DEBUG]${plain} CFLAGS: $(pkg-config --cflags libev)"
+            echo -e "${yellow}[DEBUG]${plain} LIBS: $(pkg-config --libs libev)"
+        else
+            echo -e "${red}[DEBUG]${plain} ✗ pkg-config cannot find libev"
+            echo -e "${yellow}[DEBUG]${plain} PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+        fi
+        
+        # Test compilation
+        echo -e "${yellow}[DEBUG]${plain} Testing libev compilation:"
+        cat > /tmp/test_libev.c << 'EOF'
+#include <ev.h>
+int main() {
+    ev_loop_destroy(EV_DEFAULT);
+    return 0;
+}
+EOF
+        if gcc -o /tmp/test_libev /tmp/test_libev.c -lev 2>/tmp/libev_compile_error.log; then
+            echo -e "${green}[DEBUG]${plain} ✓ libev test compilation: SUCCESS"
+            rm -f /tmp/test_libev /tmp/test_libev.c /tmp/libev_compile_error.log
+        else
+            echo -e "${red}[DEBUG]${plain} ✗ libev test compilation: FAILED"
+            echo -e "${yellow}[DEBUG]${plain} Compilation error:"
+            cat /tmp/libev_compile_error.log
+            rm -f /tmp/test_libev /tmp/test_libev.c /tmp/libev_compile_error.log
+        fi
+        
+        echo -e "${yellow}[DEBUG]${plain} ===== END LIBEV VERIFICATION ====="
+        
+        # Final verification
+        if [ -f /usr/include/ev.h ] && [ -f /usr/lib64/libev.so ]; then
+            echo -e "${green}[Info]${plain} libev installation verification: PASSED"
+            cd /tmp && rm -rf ${libevver}*
+            return 0
+        else
+            echo -e "${red}[Error]${plain} libev installation verification: FAILED - missing required files"
+            cd /tmp && rm -rf ${libevver}*
+            return 1
+        fi
     else
         echo -e "${red}[Error]${plain} Failed to compile libev from source!"
-        cd /tmp && rm -rf libev-4.33*
+        echo -e "${yellow}[DEBUG]${plain} Last 20 lines of make output (if available):"
+        tail -20 /tmp/libev_make.log 2>/dev/null || echo "No make log available"
+        cd /tmp && rm -rf ${libevver}*
         return 1
     fi
 }
@@ -121,20 +198,16 @@ EOF
 function ensure_libev_available() {
     echo -e "${green}[Info]${plain} Checking libev availability..."
     
-    # Check if libev is already available
-    if pkg-config --exists libev 2>/dev/null; then
-        echo -e "${green}[Info]${plain} libev found via pkg-config"
-        return 0
+    # For CentOS 9, force reinstallation to ensure compatibility
+    if check_centos_main_version 9; then
+        echo -e "${yellow}[Warning]${plain} CentOS 9 detected, forcing libev reinstallation..."
+        install_libev_from_source
+        return $?
     fi
     
-    if ldconfig -p | grep -q libev; then
-        echo -e "${green}[Info]${plain} libev found via ldconfig"
-        return 0
-    fi
-    
-    if [ -f /usr/local/lib/libev.so ] || [ -f /usr/lib64/libev.so ] || [ -f /usr/lib/libev.so ]; then
-        echo -e "${green}[Info]${plain} libev library files found"
-        ldconfig  # Make sure it's in the cache
+    # Check if libev is already properly installed
+    if [ -f /usr/include/ev.h ] && [ -f /usr/lib64/libev.so ]; then
+        echo -e "${green}[Info]${plain} libev already installed and verified"
         return 0
     fi
     
@@ -146,18 +219,15 @@ function ensure_libev_available() {
         pkg_manager="dnf"
     fi
     
-    # Try different package names for different CentOS versions
-    local packages_to_try=()
-    
+    # CentOS 9 doesn't have working libev packages, always compile from source
     if check_centos_main_version 9; then
-        # CentOS 9 specific packages
-        packages_to_try=("libev-devel" "compat-libev-devel")
-    else
-        # CentOS 6, 7, 8 packages
-        packages_to_try=("libev-devel" "libevent-devel")
+        echo -e "${yellow}[Warning]${plain} CentOS 9 detected, compiling libev from source for compatibility..."
+        install_libev_from_source
+        return $?
     fi
     
-    for pkg in "${packages_to_try[@]}"; do
+    # Try package installation for older CentOS versions
+    for pkg in libev-devel libevent-devel; do
         echo -e "${green}[Info]${plain} Trying to install $pkg..."
         ${pkg_manager} install -y $pkg
         if [ $? -eq 0 ]; then
@@ -593,6 +663,20 @@ function install_shadowsocks() {
     # Update library cache
     ldconfig
     
+    # Debug: Show current libev status
+    echo -e "${yellow}[DEBUG]${plain} ===== CURRENT LIBEV STATUS ====="
+    echo -e "${yellow}[DEBUG]${plain} Header files:"
+    ls -la /usr/include/ev.h 2>/dev/null || echo "No ev.h in /usr/include/"
+    ls -la /usr/local/include/ev.h 2>/dev/null || echo "No ev.h in /usr/local/include/"
+    
+    echo -e "${yellow}[DEBUG]${plain} Library files:"
+    ls -la /usr/lib64/libev* 2>/dev/null || echo "No libev in /usr/lib64/"
+    ls -la /usr/local/lib/libev* 2>/dev/null || echo "No libev in /usr/local/lib/"
+    
+    echo -e "${yellow}[DEBUG]${plain} pkg-config status:"
+    pkg-config --exists libev && echo "✓ pkg-config can find libev" || echo "✗ pkg-config cannot find libev"
+    echo -e "${yellow}[DEBUG]${plain} ===== END LIBEV STATUS ===="
+    
     cd ${currentdir}
     if [[ ${updateornot} == "not" ]]; then
         download "${shadowsocksver}.tar.gz" "${shadowsocksurl}"
@@ -604,24 +688,69 @@ function install_shadowsocks() {
         cd ${shadowsocksnewver}
     fi
     
-    # Set up comprehensive environment variables for compilation
-    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:$PKG_CONFIG_PATH"
-    export CPPFLAGS="-I/usr/local/include -I/usr/include $CPPFLAGS"
-    export LDFLAGS="-L/usr/local/lib -L/usr/local/lib64 -L/usr/lib64 -L/usr/lib -Wl,-rpath,/usr/local/lib $LDFLAGS"
-    export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:$LD_LIBRARY_PATH"
-    export C_INCLUDE_PATH="/usr/local/include:/usr/include:$C_INCLUDE_PATH"
-    export LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:$LIBRARY_PATH"
+    # Set up environment variables - libev is now in standard system paths
+    export PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:$PKG_CONFIG_PATH"
+    export CPPFLAGS="-I/usr/include $CPPFLAGS"
+    export LDFLAGS="-L/usr/lib64 -L/usr/lib $LDFLAGS"
+    export LD_LIBRARY_PATH="/usr/lib64:/usr/lib:$LD_LIBRARY_PATH"
     
-    # Force configure to find libev
-    export libev_CFLAGS="-I/usr/local/include"
-    export libev_LIBS="-L/usr/local/lib -lev"
+    echo -e "${yellow}[DEBUG]${plain} ===== SHADOWSOCKS COMPILATION DEBUG ====="
+    echo -e "${yellow}[DEBUG]${plain} Current directory: $(pwd)"
+    echo -e "${yellow}[DEBUG]${plain} Environment variables:"
+    echo -e "${yellow}[DEBUG]${plain} PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+    echo -e "${yellow}[DEBUG]${plain} CPPFLAGS=$CPPFLAGS"
+    echo -e "${yellow}[DEBUG]${plain} LDFLAGS=$LDFLAGS"
+    echo -e "${yellow}[DEBUG]${plain} LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
     
-    echo -e "${green}[Info]${plain} Configuring shadowsocks..."
-    # Configure with explicit libev paths for CentOS 9
-    ./configure --disable-documentation \
-                --with-ev=/usr/local \
-                --enable-static \
-                --enable-shared
+    echo -e "${green}[Info]${plain} Pre-configure libev verification..."
+    
+    # Verify libev header
+    if [ -f /usr/include/ev.h ]; then
+        echo -e "${green}[DEBUG]${plain} ✓ libev header found: /usr/include/ev.h"
+    else
+        echo -e "${red}[DEBUG]${plain} ✗ libev header not found in /usr/include/ev.h!"
+        echo -e "${yellow}[DEBUG]${plain} Searching for ev.h:"
+        find /usr -name "ev.h" 2>/dev/null || echo "No ev.h found in /usr"
+        exit 1
+    fi
+    
+    # Verify libev library
+    if [ -f /usr/lib64/libev.so ]; then
+        echo -e "${green}[DEBUG]${plain} ✓ libev library found: /usr/lib64/libev.so"
+    else
+        echo -e "${red}[DEBUG]${plain} ✗ libev library not found in /usr/lib64/!"
+        echo -e "${yellow}[DEBUG]${plain} Searching for libev libraries:"
+        find /usr -name "libev*" -type f 2>/dev/null || echo "No libev libraries found in /usr"
+        exit 1
+    fi
+    
+    # Test pkg-config
+    echo -e "${yellow}[DEBUG]${plain} Testing pkg-config for libev:"
+    if pkg-config --exists libev; then
+        echo -e "${green}[DEBUG]${plain} ✓ pkg-config can find libev"
+        echo -e "${yellow}[DEBUG]${plain} libev CFLAGS: $(pkg-config --cflags libev)"
+        echo -e "${yellow}[DEBUG]${plain} libev LIBS: $(pkg-config --libs libev)"
+    else
+        echo -e "${yellow}[DEBUG]${plain} ⚠ pkg-config cannot find libev (may not be critical)"
+    fi
+    
+    echo -e "${green}[Info]${plain} libev verification passed - starting shadowsocks configure"
+    echo -e "${yellow}[DEBUG]${plain} Running: ./configure --disable-documentation"
+    
+    ./configure --disable-documentation 2>&1 | tee /tmp/shadowsocks_configure.log
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo -e "${red}[Error]${plain} Shadowsocks configure failed!"
+        echo -e "${yellow}[DEBUG]${plain} ===== CONFIGURE ERROR ANALYSIS ====="
+        echo -e "${yellow}[DEBUG]${plain} Searching for libev-related errors in configure log:"
+        grep -i "libev\|ev\.h\|ev_loop" /tmp/shadowsocks_configure.log || echo "No libev errors found"
+        echo -e "${yellow}[DEBUG]${plain} Last 50 lines of configure log:"
+        tail -50 /tmp/shadowsocks_configure.log
+        echo -e "${yellow}[DEBUG]${plain} ===== END ERROR ANALYSIS ====="
+        exit 1
+    fi
+    
+    echo -e "${green}[DEBUG]${plain} ✓ Shadowsocks configure succeeded!"
     make && make install
     if [ $? -ne 0 ]; then
         echo -e "${red}[Error]${plain} Shadowsocks install failed, please try again!"
