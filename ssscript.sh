@@ -44,8 +44,11 @@ function disable_selinux() {
 
 #Install libev from source (fallback for CentOS 9)
 function install_libev_from_source() {
-    echo -e "${green}[Info]${plain} Compiling libev from source..."
+    echo -e "${green}[Info]${plain} libev not found in packages, compiling from source..."
     cd /tmp
+    
+    # Clean up any previous attempts
+    rm -rf libev-4.33*
     
     # Download and compile libev
     wget -O libev-4.33.tar.gz http://dist.schmorp.de/libev/libev-4.33.tar.gz
@@ -57,7 +60,9 @@ function install_libev_from_source() {
     tar zxf libev-4.33.tar.gz
     cd libev-4.33
     
-    ./configure --prefix=/usr/local
+    # Configure and compile
+    ./configure --prefix=/usr/local --enable-shared --enable-static
+    make clean
     make && make install
     
     if [ $? -eq 0 ]; then
@@ -67,10 +72,26 @@ function install_libev_from_source() {
         echo "/usr/local/lib" > /etc/ld.so.conf.d/libev.conf
         ldconfig
         
-        # Create symlinks for compatibility
+        # Create symlinks for compatibility if needed
         if [ ! -f /usr/include/ev.h ] && [ -f /usr/local/include/ev.h ]; then
             ln -sf /usr/local/include/ev.h /usr/include/ev.h
         fi
+        
+        # Create pkgconfig file if it doesn't exist
+        mkdir -p /usr/local/lib/pkgconfig
+        cat > /usr/local/lib/pkgconfig/libev.pc << EOF
+prefix=/usr/local
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: libev
+Description: A full-featured and high-performance event loop
+Version: 4.33
+Libs: -L\${libdir} -lev
+Libs.private: -lm
+Cflags: -I\${includedir}
+EOF
         
         cd /tmp && rm -rf libev-4.33*
         return 0
@@ -79,6 +100,54 @@ function install_libev_from_source() {
         cd /tmp && rm -rf libev-4.33*
         return 1
     fi
+}
+
+#Auto-diagnose and fix libev issues
+function ensure_libev_available() {
+    echo -e "${green}[Info]${plain} Checking libev availability..."
+    
+    # Check if libev is already available
+    if pkg-config --exists libev 2>/dev/null; then
+        echo -e "${green}[Info]${plain} libev found via pkg-config"
+        return 0
+    fi
+    
+    if ldconfig -p | grep -q libev; then
+        echo -e "${green}[Info]${plain} libev found via ldconfig"
+        return 0
+    fi
+    
+    if [ -f /usr/local/lib/libev.so ] || [ -f /usr/lib64/libev.so ] || [ -f /usr/lib/libev.so ]; then
+        echo -e "${green}[Info]${plain} libev library files found"
+        ldconfig  # Make sure it's in the cache
+        return 0
+    fi
+    
+    # Try to install from packages first
+    echo -e "${yellow}[Warning]${plain} libev not found, trying to install from packages..."
+    
+    local pkg_manager="yum"
+    if command -v dnf > /dev/null 2>&1; then
+        pkg_manager="dnf"
+    fi
+    
+    # Try different package names
+    for pkg in libev-devel libevent-devel; do
+        echo -e "${green}[Info]${plain} Trying to install $pkg..."
+        ${pkg_manager} install -y $pkg
+        if [ $? -eq 0 ]; then
+            ldconfig
+            if pkg-config --exists libev 2>/dev/null || ldconfig -p | grep -q libev; then
+                echo -e "${green}[Info]${plain} Successfully installed $pkg"
+                return 0
+            fi
+        fi
+    done
+    
+    # If package installation failed, compile from source
+    echo -e "${yellow}[Warning]${plain} Package installation failed, compiling libev from source..."
+    install_libev_from_source
+    return $?
 }
 
 #Check release
@@ -292,18 +361,15 @@ function set_shadowsocks_config_easy(){
 #install dependencies
 function install_dependencies() {
     if check_release centos; then
-        # Determine package manager and packages based on CentOS version
+        # Determine package manager based on CentOS version
         local pkg_manager="yum"
-        local libev_package="libev-devel"
-        
-        # For CentOS 8+ use dnf and updated package names
         if check_centos_main_version 8 || check_centos_main_version 9; then
             pkg_manager="dnf"
-            # In CentOS 9, libev-devel is available in EPEL, but we can also try libevent-devel
-            libev_package="libev-devel"
         fi
         
+        # Install EPEL repository
         if [ ! -f /etc/yum.repos.d/epel.repo ]; then
+            echo -e "${green}[Info]${plain} Installing EPEL repository..."
             ${pkg_manager} install -y epel-release
             if [ $? -ne 0 ]; then
                 echo -e "${red}[Error]${plain} EPEL install failed, please try again!"
@@ -311,52 +377,29 @@ function install_dependencies() {
             fi
         fi
         
-        # Check for yum-config-manager or dnf config-manager
-        local config_manager_cmd=""
+        # Enable EPEL repository
+        echo -e "${green}[Info]${plain} Enabling EPEL repository..."
         if command -v dnf > /dev/null 2>&1; then
-            config_manager_cmd="dnf config-manager"
-        elif command -v yum-config-manager > /dev/null 2>&1; then
-            config_manager_cmd="yum-config-manager"
+            dnf config-manager --set-enabled epel
         else
-            ${pkg_manager} install -y yum-utils
-            if command -v dnf > /dev/null 2>&1; then
-                config_manager_cmd="dnf config-manager"
-            else
-                config_manager_cmd="yum-config-manager"
-            fi
+            # Install yum-utils if needed
+            command -v yum-config-manager > /dev/null 2>&1 || ${pkg_manager} install -y yum-utils
+            yum-config-manager --enable epel
         fi
         
-        # Enable EPEL repository
-        ${config_manager_cmd} --set-enabled epel
-        
-        # Try to install packages, if libev-devel fails, try libevent-devel
+        # Install basic dependencies
+        echo -e "${green}[Info]${plain} Installing basic dependencies..."
         ${pkg_manager} install -y unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto pcre pcre-devel git c-ares-devel wget
         if [ $? -ne 0 ]; then
             echo -e "${red}[Error]${plain} Basic dependencies install failed, please try again!"
             exit 1
         fi
         
-        # Try libev-devel first, then libevent-devel if it fails
-        echo -e "${green}[Info]${plain} Installing libev/libevent development package..."
-        ${pkg_manager} install -y ${libev_package}
+        # Auto-diagnose and fix libev
+        ensure_libev_available
         if [ $? -ne 0 ]; then
-            echo -e "${yellow}[Warning]${plain} ${libev_package} not found, trying alternative packages..."
-            
-            # Try different libev package names for CentOS 9
-            for pkg in libevent-devel libev4-devel libev-dev; do
-                echo -e "${green}[Info]${plain} Trying to install $pkg..."
-                ${pkg_manager} install -y $pkg
-                if [ $? -eq 0 ]; then
-                    echo -e "${green}[Info]${plain} Successfully installed $pkg"
-                    break
-                fi
-            done
-            
-            # If still failed, try to compile libev from source
-            if ! pkg-config --exists libev 2>/dev/null && ! ldconfig -p | grep -q libev; then
-                echo -e "${yellow}[Warning]${plain} No libev package found, attempting to compile from source..."
-                install_libev_from_source
-            fi
+            echo -e "${red}[Error]${plain} Failed to install libev! Cannot continue."
+            exit 1
         fi
     else
         apt-get update
@@ -507,7 +550,17 @@ EOF
 
 #Install shadowsocks
 function install_shadowsocks() {
+    # Final check for libev before compiling shadowsocks
+    echo -e "${green}[Info]${plain} Final libev check before compiling shadowsocks..."
+    ensure_libev_available
+    if [ $? -ne 0 ]; then
+        echo -e "${red}[Error]${plain} libev is required for shadowsocks but not available!"
+        exit 1
+    fi
+    
+    # Update library cache
     ldconfig
+    
     cd ${currentdir}
     if [[ ${updateornot} == "not" ]]; then
         download "${shadowsocksver}.tar.gz" "${shadowsocksurl}"
@@ -519,11 +572,13 @@ function install_shadowsocks() {
         cd ${shadowsocksnewver}
     fi
     
-    # Configure with additional library paths for CentOS 9
-    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
-    export CPPFLAGS="-I/usr/local/include $CPPFLAGS"
-    export LDFLAGS="-L/usr/local/lib $LDFLAGS"
+    # Set up environment variables for compilation
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig:$PKG_CONFIG_PATH"
+    export CPPFLAGS="-I/usr/local/include -I/usr/include $CPPFLAGS"
+    export LDFLAGS="-L/usr/local/lib -L/usr/lib64 -L/usr/lib $LDFLAGS"
+    export LD_LIBRARY_PATH="/usr/local/lib:/usr/lib64:/usr/lib:$LD_LIBRARY_PATH"
     
+    echo -e "${green}[Info]${plain} Configuring shadowsocks..."
     ./configure --disable-documentation
     make && make install
     if [ $? -ne 0 ]; then
