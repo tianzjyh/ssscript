@@ -253,25 +253,59 @@ function set_shadowsocks_config_easy(){
 #install dependencies
 function install_dependencies() {
     if check_release centos; then
+        # Determine package manager and packages based on CentOS version
+        local pkg_manager="yum"
+        local libev_package="libev-devel"
+        
+        # For CentOS 8+ use dnf and updated package names
+        if check_centos_main_version 8 || check_centos_main_version 9; then
+            pkg_manager="dnf"
+            # In CentOS 9, libev-devel is available in EPEL, but we can also try libevent-devel
+            libev_package="libev-devel"
+        fi
+        
         if [ ! -f /etc/yum.repos.d/epel.repo ]; then
-            yum install -y epel-release
+            ${pkg_manager} install -y epel-release
             if [ $? -ne 0 ]; then
                 echo -e "${red}[Error]${plain} EPEL install failed, please try again!"
                 exit 1
             fi
         fi
-        command -v yum-config-manager > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-            yum install -y yum-utils
+        
+        # Check for yum-config-manager or dnf config-manager
+        local config_manager_cmd=""
+        if command -v dnf > /dev/null 2>&1; then
+            config_manager_cmd="dnf config-manager"
+        elif command -v yum-config-manager > /dev/null 2>&1; then
+            config_manager_cmd="yum-config-manager"
+        else
+            ${pkg_manager} install -y yum-utils
+            if command -v dnf > /dev/null 2>&1; then
+                config_manager_cmd="dnf config-manager"
+            else
+                config_manager_cmd="yum-config-manager"
+            fi
         fi
-        local epelstatus=$(yum-config-manager epel | grep -w "enabled" | cut -d " " -f 3)
-        if [[ ${epelstatus} != "True" ]]; then
-            yum-config-manager --enable epel
-        fi
-        yum install -y unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto libev-devel pcre pcre-devel git c-ares-devel wget
+        
+        # Enable EPEL repository
+        ${config_manager_cmd} --set-enabled epel
+        
+        # Try to install packages, if libev-devel fails, try libevent-devel
+        ${pkg_manager} install -y unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto pcre pcre-devel git c-ares-devel wget
         if [ $? -ne 0 ]; then
-            echo -e "${red}[Error]${plain} Dependencies install failed, please try again!"
+            echo -e "${red}[Error]${plain} Basic dependencies install failed, please try again!"
             exit 1
+        fi
+        
+        # Try libev-devel first, then libevent-devel if it fails
+        ${pkg_manager} install -y ${libev_package}
+        if [ $? -ne 0 ]; then
+            echo -e "${yellow}[Warning]${plain} ${libev_package} not found, trying libevent-devel..."
+            ${pkg_manager} install -y libevent-devel
+            if [ $? -ne 0 ]; then
+                echo -e "${red}[Error]${plain} Neither libev-devel nor libevent-devel could be installed!"
+                exit 1
+            fi
         fi
     else
         apt-get update
@@ -298,7 +332,7 @@ function set_firewall() {
                     /etc/init.d/iptables restart
                 fi
             fi
-        elif check_centos_main_version 7; then
+        elif check_centos_main_version 7 || check_centos_main_version 8 || check_centos_main_version 9; then
             systemctl status firewalld > /dev/null 2>&1
             if [ $? -eq 0 ]; then
                 firewall-cmd --query-port=${ssport}/tcp > /dev/null 2>&1
