@@ -42,6 +42,45 @@ function disable_selinux() {
     fi
 }
 
+#Install libev from source (fallback for CentOS 9)
+function install_libev_from_source() {
+    echo -e "${green}[Info]${plain} Compiling libev from source..."
+    cd /tmp
+    
+    # Download and compile libev
+    wget -O libev-4.33.tar.gz http://dist.schmorp.de/libev/libev-4.33.tar.gz
+    if [ $? -ne 0 ]; then
+        echo -e "${red}[Error]${plain} Failed to download libev source!"
+        return 1
+    fi
+    
+    tar zxf libev-4.33.tar.gz
+    cd libev-4.33
+    
+    ./configure --prefix=/usr/local
+    make && make install
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${green}[Info]${plain} libev compiled and installed successfully"
+        
+        # Update library path
+        echo "/usr/local/lib" > /etc/ld.so.conf.d/libev.conf
+        ldconfig
+        
+        # Create symlinks for compatibility
+        if [ ! -f /usr/include/ev.h ] && [ -f /usr/local/include/ev.h ]; then
+            ln -sf /usr/local/include/ev.h /usr/include/ev.h
+        fi
+        
+        cd /tmp && rm -rf libev-4.33*
+        return 0
+    else
+        echo -e "${red}[Error]${plain} Failed to compile libev from source!"
+        cd /tmp && rm -rf libev-4.33*
+        return 1
+    fi
+}
+
 #Check release
 function check_release() {
     local value=$1
@@ -298,13 +337,25 @@ function install_dependencies() {
         fi
         
         # Try libev-devel first, then libevent-devel if it fails
+        echo -e "${green}[Info]${plain} Installing libev/libevent development package..."
         ${pkg_manager} install -y ${libev_package}
         if [ $? -ne 0 ]; then
-            echo -e "${yellow}[Warning]${plain} ${libev_package} not found, trying libevent-devel..."
-            ${pkg_manager} install -y libevent-devel
-            if [ $? -ne 0 ]; then
-                echo -e "${red}[Error]${plain} Neither libev-devel nor libevent-devel could be installed!"
-                exit 1
+            echo -e "${yellow}[Warning]${plain} ${libev_package} not found, trying alternative packages..."
+            
+            # Try different libev package names for CentOS 9
+            for pkg in libevent-devel libev4-devel libev-dev; do
+                echo -e "${green}[Info]${plain} Trying to install $pkg..."
+                ${pkg_manager} install -y $pkg
+                if [ $? -eq 0 ]; then
+                    echo -e "${green}[Info]${plain} Successfully installed $pkg"
+                    break
+                fi
+            done
+            
+            # If still failed, try to compile libev from source
+            if ! pkg-config --exists libev 2>/dev/null && ! ldconfig -p | grep -q libev; then
+                echo -e "${yellow}[Warning]${plain} No libev package found, attempting to compile from source..."
+                install_libev_from_source
             fi
         fi
     else
@@ -467,6 +518,12 @@ function install_shadowsocks() {
         tar zxf ${shadowsocksnewver}.tar.gz
         cd ${shadowsocksnewver}
     fi
+    
+    # Configure with additional library paths for CentOS 9
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+    export CPPFLAGS="-I/usr/local/include $CPPFLAGS"
+    export LDFLAGS="-L/usr/local/lib $LDFLAGS"
+    
     ./configure --disable-documentation
     make && make install
     if [ $? -ne 0 ]; then
